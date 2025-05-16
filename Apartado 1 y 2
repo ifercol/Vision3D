@@ -1,0 +1,104 @@
+import numpy as np
+import cv2
+import os
+import matplotlib.pyplot as plt
+
+def guardar_imagenes(imagenes, filas=7, columnas=7, tamaño_cuadro=0.25):
+    """
+    Verifica las imágenes y devuelve los puntos 3D y 2D.
+    """
+    objpoints = []  # Puntos 3D en el espacio real
+    imgpoints = []  # Puntos 2D en las imágenes
+
+    # Tamaño del tablero en cm
+    objp = np.zeros((filas * columnas, 3), np.float32)  # Generar puntos 3D del patrón
+    objp[:, :2] = np.mgrid[0:columnas, 0:filas].T.reshape(-1, 2)
+    objp *= tamaño_cuadro  # Escalar las coordenadas en X y Y a tamaño real (25 cm por cuadrado)
+
+    for fname in imagenes:
+        if not os.path.exists(fname):
+            continue  # Saltar si no se encuentra la imagen
+        img = cv2.imread(fname)  # Cargar la imagen
+        if img is None:
+            continue  # Saltar si no se puede cargar la imagen
+                
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # Convertir a escala de grises
+                
+        # Detectar las esquinas del tablero de ajedrez
+        ret, corners = cv2.findChessboardCorners(
+            gray, (columnas, filas),
+            flags=cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FILTER_QUADS
+        )
+        
+        if ret:
+            # Refinar las posiciones de las esquinas
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1)
+            cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+                
+            # Añadir los puntos a las listas
+            objpoints.append(objp)
+            imgpoints.append(corners)
+
+    # Verificar si se detectaron suficientes puntos
+    if len(objpoints) == 0 or len(imgpoints) == 0:
+        return None, None
+
+    return objpoints, imgpoints
+
+def calibrar_matriz_P(imagenes, tamaño_cuadro=0.25, filas=7, columnas=7):
+    """
+    Calibra la cámara a partir de un conjunto de imágenes y devuelve detalles de la calibración.
+    """
+    objpoints, imgpoints = guardar_imagenes(imagenes, filas, columnas, tamaño_cuadro)
+
+    if objpoints is None or imgpoints is None:
+        print("No se pudieron obtener los puntos necesarios para la calibración.")
+        return None
+
+    # Obtener el tamaño de la imagen usando cualquier imagen de la lista
+    img = cv2.imread(imagenes[0])
+    image_size = img.shape[:2]
+
+    # Calibración de la cámara utilizando los puntos 3D y 2D
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, image_size[::-1], None, None)
+    
+    if not ret:
+        print("La calibración falló. Asegúrate de que las imágenes son adecuadas.")
+        return None
+    
+    return mtx, dist, rvecs, tvecs
+
+imagenes_calibracion = ['1.jpg', '2.jpg', '3.jpg', '4.jpg', '5.jpg', '6.jpg', '7.jpg', '8.jpg','9.jpg', '10.jpg', '11.jpg', '12.jpg', '13.jpg', '14.jpg', '15.jpg','16.jpg', '17.jpg', '18.jpg', '19.jpg', '20.jpg']
+
+mtx, dist, rvecs, tvecs = calibrar_matriz_P(imagenes_calibracion, tamaño_cuadro=0.25, filas=7, columnas=7)# Llamada a la función de calibración
+
+#calibración exitosa, obtener R y t
+if mtx is not None:
+    # Convertir vectores de rotación a matriz
+    R, _ = cv2.Rodrigues(rvecs[0])
+
+    # Comprobar ortogonalidad y determinante
+    if not np.allclose(R.T @ R, np.eye(3)):
+        print("La matriz de rotación no es ortogonal.")
+        R = np.linalg.inv(R)
+    if np.linalg.det(R) < 0:
+        R = -R
+
+    t = tvecs[0]
+
+    # Formar matriz [R | t]
+    RT = np.hstack((R, t.reshape(-1,1)))
+
+    # Calcular matriz de proyección
+    P = mtx @ RT
+
+    print("\nMatriz de proyección P:")
+    print(P)
+
+  
+    print("\nMatriz intrínseca K:")
+    print(mtx)
+    print("\nMatriz de rotación R:")
+    print(R)
+    print("\nVector de traslación t:")
+    print(t)
