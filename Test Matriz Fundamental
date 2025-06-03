@@ -1,49 +1,54 @@
 # -- coding: utf-8 --
 
-import os
 import numpy as np
 import pytest
 import cv2
-from final import guardar_imagenes, calibrar_matriz_P
+from final import normalizar_puntos, obtener_puntos
+
+# Usamos imágenes reales y SIFT como fuente de puntos
+def extraer_puntos_sift(img1_path, img2_path, n=50):
+    img1 = cv2.imread(img1_path, cv2.IMREAD_GRAYSCALE)
+    img2 = cv2.imread(img2_path, cv2.IMREAD_GRAYSCALE)
+    assert img1 is not None, f"No se pudo cargar {img1_path}"
+    assert img2 is not None, f"No se pudo cargar {img2_path}"
+
+    sift = cv2.SIFT_create()
+    kp1, des1 = sift.detectAndCompute(img1, None)
+    kp2, des2 = sift.detectAndCompute(img2, None)
+
+    matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+    matches = matcher.match(des1, des2)
+    matches = sorted(matches, key=lambda x: x.distance)[:n]
+
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+    return pts1, pts2
 
 @pytest.fixture
-def imagenes():
-    return [f"{i}.jpg" for i in range(1, 21)]
+def puntos_ejemplo():
+    # Extrae puntos reales de imágenes
+    return extraer_puntos_sift("tele1.jpg", "tele2.jpg", n=50)
 
-def test_guardar_imagenes(imagenes):
-    print("\n[TEST] Probando guardar_imagenes...")
-    for img in imagenes:
-        assert os.path.exists(img), f"No se encontró la imagen {img}"
+def test_normalizar_puntos(puntos_ejemplo):
+    x1, _ = puntos_ejemplo
+    x1_norm, T = normalizar_puntos(x1)
 
-    objpoints, imgpoints = guardar_imagenes(imagenes)
-
-    assert objpoints is not None and imgpoints is not None, "No se detectaron puntos"
-    assert len(objpoints) == len(imgpoints) > 0, "No hay suficientes puntos"
-
-    for i, (objp, imgp) in enumerate(zip(objpoints, imgpoints)):
-        assert objp.shape == (49, 3), f"objpoints[{i}] tiene forma incorrecta: {objp.shape}"
-        assert imgp.shape[0] == 49 and imgp.shape[1:] == (1, 2), f"imgpoints[{i}] tiene forma incorrecta: {imgp.shape}"
-
-    print("[ÉXITO] guardar_imagenes pasó correctamente.")
-
-def test_calibrar_matriz_P(imagenes):
-    print("\n[TEST] Probando calibrar_matriz_P...")
-    for img in imagenes:
-        assert os.path.exists(img), f"No se encontró la imagen {img}"
-
-    resultado = calibrar_matriz_P(imagenes)
-    assert resultado is not None, "Calibración fallida"
-
-    mtx, dist, rvecs, tvecs = resultado
-
-    assert mtx.shape == (3, 3), f"Matriz intrínseca con forma inesperada: {mtx.shape}"
-    print("Distorsión:", dist)
-    print("Forma:", dist.shape)
-
-    assert dist.shape[0] >= 1, f"Vector de distorsión con longitud inesperada: {dist.shape[0]}"
-    assert len(rvecs) == len(tvecs), "Número desigual de vectores de rotación y traslación"
-    assert len(rvecs) >= 10, f"Pocas vistas válidas para calibrar: {len(rvecs)}"
+    assert x1_norm.shape == (50, 3), "Dimensión incorrecta tras normalización"
+    media = np.mean(x1_norm[:, :2], axis=0)
+    assert np.allclose(media, [0, 0], atol=1e-6), f"Media no centrada: {media}"
 
 
-    print("[ÉXITO] calibrar_matriz_P pasó correctamente.")
+def test_obtener_puntos(puntos_ejemplo):
+    x1, x2 = puntos_ejemplo
+    F = obtener_puntos(x1, x2)
 
+    assert F.shape == (3, 3), "La matriz F no es 3x3"
+
+    U, S, Vt = np.linalg.svd(F)
+    assert np.isclose(S[-1], 0, atol=1e-6), "La matriz F no tiene rango 2"
+
+    x1_h = np.hstack([x1, np.ones((x1.shape[0], 1))])
+    x2_h = np.hstack([x2, np.ones((x2.shape[0], 1))])
+    errores = [x2_h[i] @ F @ x1_h[i].T for i in range(len(x1))]
+    max_error = max(abs(e) for e in errores)
+    assert max_error < 0.2, f"Condición epipolar no se cumple suficientemente: max_error={max_error}"
