@@ -1,0 +1,47 @@
+# test_ransac.py
+import numpy as np
+import cv2
+import pytest
+from final import ransac
+
+def extraer_puntos_sift(img1_path, img2_path, num_matches=100):
+    """
+    Extrae puntos coincidentes entre dos imágenes usando SIFT + Brute Force.
+    """
+    img1 = cv2.imread(img1_path, cv2.IMREAD_GRAYSCALE)
+    img2 = cv2.imread(img2_path, cv2.IMREAD_GRAYSCALE)
+
+    if img1 is None or img2 is None:
+        raise ValueError("No se pudieron cargar las imágenes.")
+
+    sift = cv2.SIFT_create()
+    kp1, des1 = sift.detectAndCompute(img1, None)
+    kp2, des2 = sift.detectAndCompute(img2, None)
+
+    bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+    matches = bf.match(des1, des2)
+
+    matches = sorted(matches, key=lambda x: x.distance)[:num_matches]
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+    print("Número de matches:", len(pts1))
+    return pts1, pts2
+
+def test_ransac_con_imagenes_reales():
+    """
+    Testea que la función RANSAC devuelve una matriz F válida con inliers.
+    """
+    x1, x2 = extraer_puntos_sift("chicles1.jpg", "chicles2.jpg")
+    F, inliers_mask = ransac(x1, x2, umbral=0.5, max_iter=2000, min_inliers=8, semilla=42)
+
+
+    assert F is not None, "La matriz F es None"
+    assert isinstance(F, np.ndarray), "F no es un array de NumPy"
+    assert F.shape == (3, 3), f"F tiene forma incorrecta: {F.shape}"
+    assert np.linalg.matrix_rank(F) == 2, "F no tiene rango 2"
+
+    assert inliers_mask is not None, "Máscara de inliers no devuelta"
+    assert isinstance(inliers_mask, np.ndarray), "La máscara no es un array"
+    assert inliers_mask.dtype == bool, "La máscara no es booleana"
+    assert np.sum(inliers_mask) >= 8, "Se esperaban al menos 8 inliers válidos"
+
