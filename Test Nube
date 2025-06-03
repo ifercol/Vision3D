@@ -1,0 +1,80 @@
+import numpy as np
+import cv2
+import pytest
+import matplotlib.pyplot as plt
+from final import emparejamiento_por_bloques, disparidad_a_nube_3d_con_color, calibrar_matriz_P
+
+@pytest.mark.timeout(180)
+def test_emparejamiento_nube3d_con_K_real():
+    # Rutas imágenes
+    img_izq_path = "velas1.jpg"
+    img_der_path = "velas2.jpg"
+    img_color_path = "velas1.jpg"
+
+    # Cargar imágenes
+    img_izq = cv2.imread(img_izq_path, cv2.IMREAD_GRAYSCALE)
+    img_der = cv2.imread(img_der_path, cv2.IMREAD_GRAYSCALE)
+    img_color = cv2.imread(img_color_path, cv2.IMREAD_COLOR)
+
+    assert img_izq is not None, f"No se pudo cargar {img_izq_path}"
+    assert img_der is not None, f"No se pudo cargar {img_der_path}"
+    assert img_color is not None, f"No se pudo cargar {img_color_path}"
+
+    # Calibrar para obtener matriz K real
+    imagenes_calibracion = [f"{i}.jpg" for i in range(1, 21)]
+    K, dist, rvecs, tvecs = calibrar_matriz_P(imagenes_calibracion, tamaño_cuadro=0.25, filas=7, columnas=7)
+    assert K is not None, "No se pudo calibrar para obtener matriz K"
+
+    # Escalamos imágenes para acelerar (opcional)
+    escala = 0.3
+    img_izq_s = cv2.resize(img_izq, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA)
+    img_der_s = cv2.resize(img_der, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA)
+    img_color_s = cv2.resize(img_color, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA)
+
+    # Ajustar K a escala de imágenes
+    K_scaled = K.copy()
+    K_scaled[0, 0] *= escala
+    K_scaled[1, 1] *= escala
+    K_scaled[0, 2] *= escala
+    K_scaled[1, 2] *= escala
+
+    # Parámetros de emparejamiento
+    tamaño_bloque = 5
+    disp_max = 32
+    baseline = 0.1  # ejemplo en metros, ajusta según tu setup
+
+    disparidad = emparejamiento_por_bloques(img_izq_s, img_der_s, tamaño_bloque, disp_max)
+    assert disparidad is not None, "Disparidad es None"
+    assert np.any(disparidad > 0), "No se encontró disparidad positiva"
+
+    # Mostrar mapa de disparidad
+    plt.figure(figsize=(10, 6))
+    plt.title("Mapa de disparidad")
+    plt.imshow(disparidad, cmap='plasma')
+    plt.colorbar(label='Disparidad')
+    plt.axis('off')
+    plt.show()
+
+    # Generar nube 3D usando K real y escala
+    puntos_3d, colores = disparidad_a_nube_3d_con_color(disparidad, img_color_s, K_scaled, baseline)
+    assert puntos_3d.shape[0] > 0, "No se generaron puntos 3D"
+    assert colores.shape[0] == puntos_3d.shape[0], "No coinciden colores y puntos"
+
+    print(f"Puntos 3D generados: {puntos_3d.shape[0]}")
+
+    # Visualizar nube 3D (muestra)
+    try:
+        from mpl_toolkits.mplot3d import Axes3D
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection='3d')
+        muestra = puntos_3d[::50]
+        colores_muestra = colores[::50]
+        ax.scatter(muestra[:, 0], muestra[:, 1], muestra[:, 2], c=colores_muestra, s=3)
+        ax.set_title("Nube de puntos 3D (muestra) con matriz K calibrada")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        plt.show()
+    except ImportError:
+        print("mpl_toolkits.mplot3d no disponible, se omite visualización 3D")
+
