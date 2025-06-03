@@ -1,0 +1,162 @@
+import numpy as np
+import cv2
+import os
+import matplotlib.pyplot as plt
+from typing import Tuple
+%matplotlib inline
+from mpl_toolkits.mplot3d import Axes3D
+
+def rectificacion_sin_calibracion(img_izq, img_der, umbral_ransac=1.0):
+    # Detectar y emparejar puntos
+    sift = cv2.SIFT_create()
+    kp1, des1 = sift.detectAndCompute(img_izq, None)
+    kp2, des2 = sift.detectAndCompute(img_der, None)
+    bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+    matches = bf.match(des1, des2)
+
+    if len(matches) < 8:
+        print("No hay suficientes matches para calcular F.")
+        return None, None, None, None, None, None
+
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+
+    F, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, umbral_ransac)
+    if F is None or F.shape != (3, 3):
+        print("No se pudo calcular la matriz fundamental.")
+        return None, None, None, None, None, None
+
+    inliers1 = pts1[mask.ravel() == 1]
+    inliers2 = pts2[mask.ravel() == 1]
+
+    ret, H1, H2 = cv2.stereoRectifyUncalibrated(inliers1, inliers2, F, imgSize=(img_izq.shape[1], img_izq.shape[0]))
+    if not ret:
+        print("No se pudo calcular la rectificación.")
+        return None, None, None, None, None, None
+
+    pt_ref = (img_izq.shape[1] / 2, img_izq.shape[0] / 2)
+    return H1, H2, pt_ref, F, inliers1, inliers2
+
+def aplicar_homografia(imagen, H):
+    h, w = imagen.shape[:2]
+    esquinas = np.array([
+        [0, 0],
+        [w - 1, 0],
+        [w - 1, h - 1],
+        [0, h - 1]
+    ], dtype=np.float32).reshape(-1, 1, 2)
+
+    esquinas_transformadas = cv2.perspectiveTransform(esquinas, H)
+    [xmin, ymin] = np.floor(esquinas_transformadas.min(axis=0)[0]).astype(int)
+    [xmax, ymax] = np.ceil(esquinas_transformadas.max(axis=0)[0]).astype(int)
+
+    nuevo_ancho = xmax - xmin
+    nuevo_alto = ymax - ymin
+
+    T = np.array([[1, 0, -xmin],
+                  [0, 1, -ymin],
+                  [0, 0, 1]])
+
+    H_ajustada = T @ H
+    return cv2.warpPerspective(imagen, H_ajustada, (nuevo_ancho, nuevo_alto))
+
+def mostrar_rectificadas_con_lineas(img1, img2):
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+    h_min = min(h1, h2)
+
+    if h1 != h_min:
+        img1 = cv2.resize(img1, (int(w1 * h_min / h1), h_min), interpolation=cv2.INTER_AREA)
+    if h2 != h_min:
+        img2 = cv2.resize(img2, (int(w2 * h_min / h2), h_min), interpolation=cv2.INTER_AREA)
+
+    canvas = np.hstack([img1, img2])
+
+    step = h_min // 20
+    for y in range(0, h_min, step):
+        cv2.line(canvas, (0, y), (canvas.shape[1], y), (255, 0, 0), 1)
+
+    plt.figure(figsize=(14, 7))
+    plt.imshow(canvas, cmap='gray')
+    plt.title("Rectificación con líneas horizontales")
+    plt.axis('off')
+    plt.show()
+
+img_izq = cv2.imread('velas1.jpg', cv2.IMREAD_GRAYSCALE)
+img_der = cv2.imread('velas2.jpg', cv2.IMREAD_GRAYSCALE)
+
+Hl, Hr, pt_ref, F, inliers1, inliers2 = rectificacion_sin_calibracion(img_izq, img_der)
+
+if Hl is not None and Hr is not None:
+    img_izq_rect = aplicar_homografia(img_izq, Hl)
+    img_der_rect = aplicar_homografia(img_der, Hr)
+
+    # Guardar imágenes rectificadas
+    cv2.imwrite('velas1_rectificada.jpg', img_izq_rect)
+    cv2.imwrite('velas2_rectificada.jpg', img_der_rect)
+
+    mostrar_rectificadas_con_lineas(img_izq_rect, img_der_rect)
+
+    print("Punto de referencia usado para centrar la rectificación:", pt_ref)
+    print("Matriz Fundamental F calculada:")
+    print(F)
+    print(f"Número de inliers usados: {len(inliers1)}")
+else:
+    print("Error al calcular las homografías de rectificación.")
+
+def aplicar_homografia_nueva(imagen, H):
+    h, w = imagen.shape[:2]
+    nuevo_w, nuevo_h = w, h  
+    H_ajustada = H  
+    img_rect = cv2.warpPerspective(imagen, H_ajustada, (nuevo_w, nuevo_h))
+    return img_rect, H_ajustada, nuevo_w, nuevo_h
+
+
+def dibujar_epipolares_rectificadas(img_izq, img_der, inliers1, inliers2, H1, H2, w1, w2, num_puntos=10):
+    inliers1_h = cv2.convertPointsToHomogeneous(inliers1).reshape(-1, 3).T
+    inliers2_h = cv2.convertPointsToHomogeneous(inliers2).reshape(-1, 3).T
+
+    pts1_rect = (H1 @ inliers1_h).T
+    pts2_rect = (H2 @ inliers2_h).T
+
+    pts1_rect /= pts1_rect[:, 2][:, np.newaxis]
+    pts2_rect /= pts2_rect[:, 2][:, np.newaxis]
+
+    idxs = np.random.choice(len(pts1_rect), min(num_puntos, len(pts1_rect)), replace=False)
+    pts1 = pts1_rect[idxs, :2]
+    pts2 = pts2_rect[idxs, :2]
+
+    img1 = cv2.cvtColor(img_izq, cv2.COLOR_GRAY2BGR)
+    img2 = cv2.cvtColor(img_der, cv2.COLOR_GRAY2BGR)
+
+    canvas = np.zeros((max(img1.shape[0], img2.shape[0]), w1 + w2, 3), dtype=np.uint8)
+
+    img1_rect = cv2.warpPerspective(img1, H1, (w1, img1.shape[0]))
+    img2_rect = cv2.warpPerspective(img2, H2, (w2, img2.shape[0]))
+
+    canvas[:img1_rect.shape[0], :w1] = img1_rect
+    canvas[:img2_rect.shape[0], w1:w1 + w2] = img2_rect
+
+    for p1, p2 in zip(pts1, pts2):
+        color = tuple(np.random.randint(0, 255, 3).tolist())
+        p1_int = tuple(np.round(p1).astype(int))
+        p2_int = tuple(np.round(p2).astype(int) + np.array([w1, 0]))
+
+        cv2.circle(canvas, p1_int, 6, color, -1)
+        cv2.circle(canvas, p2_int, 6, color, -1)
+        cv2.line(canvas, p1_int, p2_int, color, 2)
+        # Línea epipolar horizontal en la izquierda
+        cv2.line(canvas, (0, p1_int[1]), (canvas.shape[1], p1_int[1]), (0, 255, 255), 1)
+
+    plt.figure(figsize=(20, 10))
+    plt.imshow(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    plt.title("Epipolares después de rectificación")
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+Hl, Hr, pt_ref, F, inliers1, inliers2 = rectificacion_sin_calibracion(img_izq, img_der)
+if Hl is not None and Hr is not None:
+    rect_izq, H_l_ajustada, w1, h1 = aplicar_homografia_nueva(img_izq, Hl)
+    rect_der, H_r_ajustada, w2, h2 = aplicar_homografia_nueva(img_der, Hr)
+    dibujar_epipolares_rectificadas(img_izq, img_der, inliers1, inliers2, H_l_ajustada, H_r_ajustada, w1, w2)
