@@ -1,0 +1,123 @@
+import numpy as np
+import cv2
+import pytest
+import matplotlib.pyplot as plt
+from final import rectificacion_sin_calibracion, aplicar_homografia, mostrar_rectificadas_con_lineas
+
+def matriz_rotacion(angle_deg):
+    """Matriz 3x3 de rotación 2D alrededor del origen"""
+    theta = np.deg2rad(angle_deg)
+    R = np.array([
+        [np.cos(theta), -np.sin(theta), 0],
+        [np.sin(theta),  np.cos(theta), 0],
+        [0,             0,             1]
+    ])
+    return R
+
+def matriz_traslacion(tx, ty):
+    """Matriz 3x3 de traslación"""
+    T = np.array([
+        [1, 0, tx],
+        [0, 1, ty],
+        [0, 0, 1]
+    ])
+    return T
+
+def seleccionar_inliers_distintos(inliers_rect, n=3):
+    """Selecciona n puntos que estén lo más alejados posible entre sí"""
+    if len(inliers_rect) <= n:
+        return np.arange(len(inliers_rect))
+
+    seleccionados = [0]  # empezar con el primero
+    for _ in range(1, n):
+        distancias = np.min([np.linalg.norm(inliers_rect - inliers_rect[i], axis=1) for i in seleccionados], axis=0)
+        distancias[seleccionados] = -1  # ignorar ya seleccionados
+        siguiente = np.argmax(distancias)
+        seleccionados.append(siguiente)
+    return np.array(seleccionados)
+
+@pytest.mark.timeout(30)
+def test_rectificacion_detallada_y_coincidencia_puntos():
+    img_izq_path = "velas1.jpg"
+    img_der_path = "velas2.jpg"
+
+    img_izq = cv2.imread(img_izq_path, cv2.IMREAD_GRAYSCALE)
+    img_der = cv2.imread(img_der_path, cv2.IMREAD_GRAYSCALE)
+    assert img_izq is not None, f"No se pudo cargar {img_izq_path}"
+    assert img_der is not None, f"No se pudo cargar {img_der_path}"
+
+    H1, H2, pt_ref, F, inliers1, inliers2 = rectificacion_sin_calibracion(img_izq, img_der)
+    assert H1 is not None and H2 is not None, "Homografías nulas"
+
+    print(f"Punto referencia (centro imagen): {pt_ref}")
+
+    h1, w1 = img_izq.shape
+    h2, w2 = img_der.shape
+
+    # Ajustar homografías para evitar pérdidas por recortes
+    esquinas = np.array([[0,0], [w1-1,0], [w1-1,h1-1], [0,h1-1]], dtype=np.float32).reshape(-1,1,2)
+    esquinas_H1 = cv2.perspectiveTransform(esquinas, H1).reshape(-1, 2)
+    xmin1, ymin1 = np.floor(esquinas_H1.min(axis=0)).astype(int)
+    T1 = matriz_traslacion(-xmin1, -ymin1)
+    H1_ajustada = T1 @ H1
+
+    esquinas2 = np.array([[0,0], [w2-1,0], [w2-1,h2-1], [0,h2-1]], dtype=np.float32).reshape(-1,1,2)
+    esquinas_H2 = cv2.perspectiveTransform(esquinas2, H2).reshape(-1, 2)
+    xmin2, ymin2 = np.floor(esquinas_H2.min(axis=0)).astype(int)
+    T2 = matriz_traslacion(-xmin2, -ymin2)
+    H2_ajustada = T2 @ H2
+
+    inliers1_h = np.hstack([inliers1, np.ones((len(inliers1),1))])
+    inliers2_h = np.hstack([inliers2, np.ones((len(inliers2),1))])
+
+    inliers1_rect = (H1_ajustada @ inliers1_h.T).T
+    inliers1_rect /= inliers1_rect[:, 2][:, np.newaxis]
+
+    inliers2_rect = (H2_ajustada @ inliers2_h.T).T
+    inliers2_rect /= inliers2_rect[:, 2][:, np.newaxis]
+
+    # Seleccionar 3 inliers bien alejados
+    indices = seleccionar_inliers_distintos(inliers1_rect, n=3)
+
+    # Aplicar homografías ajustadas a imágenes
+    img_izq_rect = aplicar_homografia(img_izq, H1_ajustada)
+    img_der_rect = aplicar_homografia(img_der, H2_ajustada)
+
+    plt.figure(figsize=(14, 7))
+    plt.subplot(1, 2, 1)
+    plt.imshow(img_izq_rect, cmap='gray')
+    plt.title("Izquierda rectificada con inliers marcados")
+    plt.axis('off')
+    for idx in indices:
+        x, y = inliers1_rect[idx, 0], inliers1_rect[idx, 1]
+        plt.plot(x, y, 'ro', markersize=12, label="Inliers" if idx == indices[0] else "")
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(img_der_rect, cmap='gray')
+    plt.title("Derecha rectificada con inliers marcados")
+    plt.axis('off')
+    for idx in indices:
+        x, y = inliers2_rect[idx, 0], inliers2_rect[idx, 1]
+        plt.plot(x, y, 'go', markersize=12, label="Inliers" if idx == indices[0] else "")
+
+    plt.legend()
+    plt.tight_layout()
+
+    # Añadir líneas horizontales para comprobar alineación
+    h_min = min(img_izq_rect.shape[0], img_der_rect.shape[0])
+    step = h_min // 20
+    for y in range(0, h_min, step):
+        plt.subplot(1, 2, 1)
+        plt.axhline(y, color='blue', linewidth=0.5, alpha=0.5)
+        plt.subplot(1, 2, 2)
+        plt.axhline(y, color='blue', linewidth=0.5, alpha=0.5)
+
+    plt.show()
+
+    # Comprobar diferencia vertical máxima
+    diff_y = np.abs(inliers1_rect[:,1] - inliers2_rect[:,1])
+    max_diff_y = np.max(diff_y)
+    print(f"Máxima diferencia vertical entre puntos inliers rectificados: {max_diff_y:.3f} píxeles")
+
+    assert max_diff_y < 30.0, f"Los puntos inliers no están bien alineados verticalmente tras rectificación (max diff {max_diff_y:.2f})"
+
