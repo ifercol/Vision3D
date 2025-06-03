@@ -1,0 +1,49 @@
+# -- coding: utf-8 --
+
+import os
+import numpy as np
+import pytest
+import cv2
+from final import guardar_imagenes, calibrar_matriz_P
+
+@pytest.fixture
+def imagenes():
+    return [f"{i}.jpg" for i in range(1, 21)]
+
+def test_guardar_imagenes(imagenes):
+    print("\n[TEST] Probando guardar_imagenes...")
+    for img in imagenes:
+        assert os.path.exists(img), f"No se encontró la imagen {img}"
+
+    objpoints, imgpoints = guardar_imagenes(imagenes)
+
+    assert objpoints is not None and imgpoints is not None, "No se detectaron puntos"
+    assert len(objpoints) == len(imgpoints) > 0, "No hay suficientes puntos"
+
+    for i, (objp, imgp) in enumerate(zip(objpoints, imgpoints)):
+        assert objp.shape == (49, 3), f"objpoints[{i}] tiene forma incorrecta: {objp.shape}"
+        assert imgp.shape[0] == 49 and imgp.shape[1:] == (1, 2), f"imgpoints[{i}] tiene forma incorrecta: {imgp.shape}"
+
+    print("[ÉXITO] guardar_imagenes pasó correctamente.")
+
+def test_calibrar_matriz_P(imagenes):
+    print("\n[TEST] Probando calibrar_matriz_P...")
+    for img in imagenes:
+        assert os.path.exists(img), f"No se encontró la imagen {img}"
+
+    resultado = calibrar_matriz_P(imagenes)
+    assert resultado is not None, "Calibración fallida"
+
+    mtx, dist, rvecs, tvecs = resultado
+
+    assert mtx.shape == (3, 3), f"Matriz intrínseca con forma inesperada: {mtx.shape}"
+    print("Distorsión:", dist)
+    print("Forma:", dist.shape)
+
+    assert dist.shape[0] >= 1, f"Vector de distorsión con longitud inesperada: {dist.shape[0]}"
+    assert len(rvecs) == len(tvecs), "Número desigual de vectores de rotación y traslación"
+    assert len(rvecs) >= 10, f"Pocas vistas válidas para calibrar: {len(rvecs)}"
+
+
+    print("[ÉXITO] calibrar_matriz_P pasó correctamente.")
+
