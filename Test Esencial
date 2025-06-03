@@ -1,0 +1,49 @@
+# -- coding: utf-8 --
+
+import numpy as np
+import pytest
+from final import matriz_fundamental, calibrar_matriz_P
+
+@pytest.fixture(scope="module")
+def datos_para_E():
+    """
+    Obtiene la matriz fundamental F y la matriz intrínseca K (mtx)
+    usando las funciones del código final.py
+    """
+    imagenes_calibracion = [f"{i}.jpg" for i in range(1, 21)]
+    mtx, dist, rvecs, tvecs = calibrar_matriz_P(imagenes_calibracion, tamaño_cuadro=0.25, filas=7, columnas=7)
+    assert mtx is not None, "No se pudo calibrar la cámara para obtener mtx"
+
+    F, pts_izq, pts_der = matriz_fundamental("pelota1.jpg", "pelota2.jpg", semilla=42)
+    assert F is not None and F.shape == (3, 3), "No se pudo calcular la matriz fundamental"
+
+    return F, mtx
+
+def test_matriz_esencial_manual(datos_para_E):
+    F, K = datos_para_E
+
+    # Cálculo manual de la matriz esencial sin corrección
+    E = K.T @ F @ K
+
+    # Descomposición SVD
+    U, S, Vt = np.linalg.svd(E)
+
+    # Comprobación rango 2
+    print(f"¿Último valor singular es cercano a 0? S[2]={S[2]:.6f}")
+
+    assert np.isclose(S[2], 0, atol=1e-6), f"La matriz esencial no tiene rango 2, valores singulares = {S}"
+    assert np.isclose(S[0], S[1], rtol=0.1), f"Los dos primeros valores singulares no son similares: {S[:2]}"
+
+    # --- Ahora corregimos la matriz para forzar rango 2 y valores singulares iguales ---
+    S_corregidos = np.array([(S[0] + S[1]) / 2, (S[0] + S[1]) / 2, 0])
+    E_corregida = U @ np.diag(S_corregidos) @ Vt
+
+    print("\nMatriz Esencial E (rango 2 y valores singulares iguales):")
+    print(E_corregida)
+    print("Valores singulares:", S_corregidos)
+
+    # Comprobamos que efectivamente la matriz corregida cumple
+    Uc, Sc, Vtc = np.linalg.svd(E_corregida)
+    assert np.isclose(Sc[2], 0, atol=1e-6), "La matriz corregida no tiene rango 2"
+    assert np.isclose(Sc[0], Sc[1], rtol=0.1), "Los dos primeros valores singulares corregidos no son similares"
+
