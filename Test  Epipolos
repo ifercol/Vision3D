@@ -1,0 +1,85 @@
+# -- coding: utf-8 --
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pytest
+import cv2
+from final import matriz_fundamental, obtener_epipolos, ransac
+
+@pytest.fixture(scope="module")
+def datos_epipolares():
+    """
+    Ejecuta la función matriz_fundamental() sobre imágenes reales
+    y retorna la matriz F y los puntos inliers.
+    """
+    F, pts_izq, pts_der = matriz_fundamental('pelota1.jpg', 'pelota2.jpg', semilla=42)
+    
+    assert F is not None, "No se pudo calcular la matriz F"
+    assert F.shape == (3, 3), "La matriz F no tiene forma 3x3"
+    return F, pts_izq, pts_der
+
+def test_matriz_fundamental_valida(datos_epipolares):
+    import cv2  # sigue importando cv2 para evitar errores si lo usas en otros tests
+
+    F, pts_izq, pts_der = datos_epipolares
+
+    assert isinstance(F, np.ndarray), "F no es un array de NumPy"
+    assert F.shape == (3, 3), f"Tamaño incorrecto de F: {F.shape}"
+
+    _, S, _ = np.linalg.svd(F)
+    assert np.isclose(S[-1], 0, atol=1e-6), f"Rango incorrecto: valores singulares = {S}"
+
+    assert len(pts_izq) >= 8 and len(pts_der) >= 8, f"Pocos inliers: {len(pts_izq)}"
+
+    # Cálculo del error epipolar como en matriz_fundamental
+    errores = []
+    for p1, p2 in zip(pts_izq, pts_der):
+        x1h = np.append(p1, 1)
+        x2h = np.append(p2, 1)
+        l2 = F @ x1h
+        l1 = F.T @ x2h
+        d2 = abs(x2h @ l2) / np.sqrt(l2[0]**2 + l2[1]**2)
+        d1 = abs(x1h @ l1) / np.sqrt(l1[0]**2 + l1[1]**2)
+        errores.append(d1 + d2)
+    errores = np.array(errores)
+    error_medio = np.mean(errores)
+
+    # Estadísticas descriptivas
+    print(f"\nError epipolar medio: {error_medio:.4f}")
+    print(f"Error epipolar mínimo: {errores.min():.4f}")
+    print(f"Error epipolar máximo: {errores.max():.4f}")
+    print(f"Desviación estándar del error: {errores.std():.4f}")
+
+    # Sólo el histograma de errores
+    plt.figure()
+    plt.hist(errores, bins=20, color='skyblue', edgecolor='black')
+    plt.title("Distribución del error epipolar")
+    plt.xlabel("Error epipolar")
+    plt.ylabel("Número de correspondencias")
+    plt.show()
+
+    # Ya no se genera la imagen con los errores pintados sobre fondo negro
+
+    assert error_medio < 1.0, f"Error epipolar alto: {error_medio:.4f}"
+
+
+def test_obtener_epipolos_validez(datos_epipolares):
+    F, _, _ = datos_epipolares
+    e_izq, e_der = obtener_epipolos(F)
+
+    assert np.all(np.isfinite(e_izq)), f"Epipolo izquierdo no finito: {e_izq}"
+    assert np.all(np.isfinite(e_der)), f"Epipolo derecho no finito: {e_der}"
+    assert e_izq.shape == (2,), f"Dimensión incorrecta epipolo izquierdo: {e_izq.shape}"
+    assert e_der.shape == (2,), f"Dimensión incorrecta epipolo derecho: {e_der.shape}"
+
+def test_epipolos_satisfacen_condicion(datos_epipolares):
+    F, _, _ = datos_epipolares
+    e_izq, e_der = obtener_epipolos(F)
+
+    e_izq_h = np.append(e_izq, 1)
+    e_der_h = np.append(e_der, 1)
+
+    assert np.allclose(F @ e_izq_h, 0, atol=1e-4), f"F @ e_izq ≠ 0: {F @ e_izq_h}"
+    assert np.allclose(F.T @ e_der_h, 0, atol=1e-4), f"F.T @ e_der ≠ 0: {F.T @ e_der_h}"
+
+
