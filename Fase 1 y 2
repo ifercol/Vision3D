@@ -1,0 +1,382 @@
+import numpy as np
+import cv2
+import os
+import matplotlib.pyplot as plt
+from typing import Tuple
+%matplotlib inline
+from mpl_toolkits.mplot3d import Axes3D
+
+def guardar_imagenes(imagenes, filas=7, columnas=7, tamaño_cuadro=0.25):
+    """
+    Verifica las imágenes y devuelve los puntos 3D y 2D.
+    """
+    objpoints = [] 
+    imgpoints = []  
+
+    objp = np.zeros((filas * columnas, 3), np.float32)  
+    objp[:, :2] = np.mgrid[0:columnas, 0:filas].T.reshape(-1, 2)
+    objp *= tamaño_cuadro 
+
+    for fname in imagenes:
+        if not os.path.exists(fname):
+            continue 
+        img = cv2.imread(fname) 
+        if img is None:
+            continue  
+                
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) 
+                
+        ret, corners = cv2.findChessboardCorners(
+            gray, (columnas, filas),
+            flags=cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FILTER_QUADS
+        )
+        
+        if ret:
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1)
+            cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+                
+            objpoints.append(objp)
+            imgpoints.append(corners)
+
+    if len(objpoints) == 0 or len(imgpoints) == 0:
+        return None, None
+
+    return objpoints, imgpoints
+
+def calibrar_matriz_P(imagenes, tamaño_cuadro=0.25, filas=7, columnas=7):
+    """
+    Calibra la cámara a partir de un conjunto de imágenes y devuelve detalles de la calibración.
+    """
+    objpoints, imgpoints = guardar_imagenes(imagenes, filas, columnas, tamaño_cuadro)
+
+    if objpoints is None or imgpoints is None:
+        print("No se pudieron obtener los puntos necesarios para la calibración.")
+        return None
+
+    img = cv2.imread(imagenes[0])
+    image_size = img.shape[:2]
+
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, image_size[::-1], None, None)
+    
+    if not ret:
+        print("La calibración falló. Asegúrate de que las imágenes son adecuadas.")
+        return None
+    
+    return mtx, dist, rvecs, tvecs
+
+imagenes_calibracion = ['1.jpg', '2.jpg', '3.jpg', '4.jpg', '5.jpg', '6.jpg', '7.jpg', '8.jpg','9.jpg', '10.jpg', '11.jpg', '12.jpg', '13.jpg', '14.jpg', '15.jpg','16.jpg', '17.jpg', '18.jpg', '19.jpg', '20.jpg']
+
+mtx, dist, rvecs, tvecs = calibrar_matriz_P(imagenes_calibracion, tamaño_cuadro=0.25, filas=7, columnas=7)# Llamada a la función de calibración
+
+if mtx is not None:
+    R, _ = cv2.Rodrigues(rvecs[0])
+
+    if not np.allclose(R.T @ R, np.eye(3)):
+        print("La matriz de rotación no es ortogonal.")
+        R = np.linalg.inv(R)
+    if np.linalg.det(R) < 0:
+        R = -R
+
+    t = tvecs[0]
+
+    RT = np.hstack((R, t.reshape(-1,1)))
+
+    P = mtx @ RT
+
+    print("\nMatriz de proyección P:")
+    print(P)
+    print("\nMatriz intrínseca K:")
+    print(mtx)
+    print("\nMatriz de rotación R:")
+    print(R)
+    print("\nVector de traslación t:")
+    print(t)
+
+def normalizar_puntos(puntos):
+    if puntos.shape[1] == 3: 
+        puntos_2d = puntos[:, :2]
+    else:
+        puntos_2d = puntos
+
+    media = np.mean(puntos_2d, axis=0)
+    desviacion = np.std(puntos_2d)
+    T = np.array([[1/desviacion, 0, -media[0]/desviacion],
+                  [0, 1/desviacion, -media[1]/desviacion],
+                  [0, 0, 1]])
+
+    puntos_homogeneos = np.hstack([puntos_2d, np.ones((puntos.shape[0], 1))])
+    puntos_normalizados = (T @ puntos_homogeneos.T).T
+    return puntos_normalizados, T
+
+def obtener_puntos(x1, x2):
+    x1_norm, T1 = normalizar_puntos(x1)
+    x2_norm, T2 = normalizar_puntos(x2)
+
+    A = []
+    for i in range(len(x1_norm)):
+        x1i, y1i = x1_norm[i][0], x1_norm[i][1]
+        x2i, y2i = x2_norm[i][0], x2_norm[i][1]
+        A.append([x2i * x1i, x2i * y1i, x2i,
+                  y2i * x1i, y2i * y1i, y2i,
+                  x1i, y1i, 1])
+    A = np.array(A)
+    _, _, Vt = np.linalg.svd(A)
+    F_norm = Vt[-1].reshape(3, 3)
+
+    U, S, Vt = np.linalg.svd(F_norm)
+    S[2] = 0
+    F_rank2 = U @ np.diag(S) @ Vt
+
+    F = T2.T @ F_rank2 @ T1
+    return F
+
+def ransac(x1, x2, umbral=1.0, max_iter=2000, min_inliers=8, semilla=42):
+    if semilla is not None:
+        np.random.seed(42)
+    mejor_F = None
+    mejores_inliers = None
+    max_inliers = 0
+
+    for _ in range(max_iter):
+        idx = np.random.choice(len(x1), 8, replace=False)
+        x1_sub = x1[idx]
+        x2_sub = x2[idx]
+
+        x1_norm, T1 = normalizar_puntos(x1_sub)
+        x2_norm, T2 = normalizar_puntos(x2_sub)
+
+        F_norm = obtener_puntos(x1_norm, x2_norm)
+        F = T2.T @ F_norm @ T1
+
+        errores = []
+        for i in range(len(x1)):
+            x1h = np.append(x1[i], 1)
+            x2h = np.append(x2[i], 1)
+            l2 = F @ x1h
+            l1 = F.T @ x2h
+            d2 = abs(x2h @ l2) / np.sqrt(l2[0]*2 + l2[1]*2)
+            d1 = abs(x1h @ l1) / np.sqrt(l1[0]*2 + l1[1]*2)
+            errores.append(d1 + d2)
+        errores = np.array(errores)
+
+        inliers = errores < umbral
+        num_inliers = np.sum(inliers)
+
+        if num_inliers >= min_inliers and num_inliers > max_inliers:
+            max_inliers = num_inliers
+            mejor_F = F
+            mejores_inliers = inliers
+
+    return mejor_F, mejores_inliers
+
+def obtener_epipolos(F):
+    """
+    Calcula los epipolos izquierdo y derecho a partir de la matriz fundamental F.
+    """
+    _, _, Vt = np.linalg.svd(F)
+    e_izq = Vt[-1]
+    e_izq /= e_izq[-1]
+
+    _, _, Vt_T = np.linalg.svd(F.T)
+    e_der = Vt_T[-1]
+    e_der /= e_der[-1]
+
+    return e_izq[:2], e_der[:2]
+
+def matriz_fundamental(ruta_img1, ruta_img2, semilla=None):
+    """
+    Calcula la matriz fundamental con SIFT + RANSAC personalizada.
+    No guarda ni carga datos en caché.
+    
+    Parámetros:
+    - ruta_img1, ruta_img2: rutas a las imágenes
+    - semilla: opcional, para reproducibilidad del RANSAC
+    
+    Retorna:
+    - F: matriz fundamental 3x3
+    - pts_izq, pts_der: puntos inliers usados para estimar F
+    """
+
+    img1 = cv2.imread(ruta_img1, cv2.IMREAD_GRAYSCALE)
+    img2 = cv2.imread(ruta_img2, cv2.IMREAD_GRAYSCALE)
+    if img1 is None or img2 is None:
+        print("Error cargando las imágenes.")
+        return None, None, None
+
+    sift = cv2.SIFT_create()
+    kp1, des1 = sift.detectAndCompute(img1, None)
+    kp2, des2 = sift.detectAndCompute(img2, None)
+
+    bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+    matches = bf.match(des1, des2)
+    if len(matches) < 8:
+        print("No hay suficientes matches.")
+        return None, None, None
+
+    matches = sorted(matches, key=lambda x: x.distance)[:100]
+    pts_izq_all = np.float32([kp1[m.queryIdx].pt for m in matches])
+    pts_der_all = np.float32([kp2[m.trainIdx].pt for m in matches])
+
+    if semilla is not None:
+        np.random.seed(semilla)
+    F, inliers_mask = ransac(pts_izq_all, pts_der_all)
+
+    if F is None or F.shape != (3, 3):
+        print("No se pudo calcular la matriz fundamental.")
+        return None, None, None
+
+    pts_izq = pts_izq_all[inliers_mask]
+    pts_der = pts_der_all[inliers_mask]
+
+    print("Matriz Fundamental F:\n", F)
+    print("Valores singulares de F:", np.linalg.svd(F)[1])
+
+    errores = []
+    for p1, p2 in zip(pts_izq, pts_der):
+        x1h = np.append(p1, 1)
+        x2h = np.append(p2, 1)
+        l2 = F @ x1h
+        l1 = F.T @ x2h
+        d2 = abs(x2h @ l2) / np.sqrt(l2[0]*2 + l2[1]*2)
+        d1 = abs(x1h @ l1) / np.sqrt(l1[0]*2 + l1[1]*2)
+        errores.append(d1 + d2)
+
+    print("Error epipolar medio:", np.mean(errores))
+    print("Número de inliers:", len(pts_izq))
+
+    return F, pts_izq, pts_der
+
+def lineas_epipolares(imagen_izq, imagen_der, F, puntos_izq, puntos_der):
+    """
+    Dibuja las líneas epipolares y los epipolos en las imágenes.
+    """
+    img_izq = cv2.cvtColor(imagen_izq, cv2.COLOR_GRAY2BGR)
+    img_der = cv2.cvtColor(imagen_der, cv2.COLOR_GRAY2BGR)
+
+    lineas_izq = cv2.computeCorrespondEpilines(puntos_der.reshape(-1, 1, 2), 2, F).reshape(-1, 3)
+    lineas_der = cv2.computeCorrespondEpilines(puntos_izq.reshape(-1, 1, 2), 1, F).reshape(-1, 3)
+
+    for r, pt in zip(lineas_izq, puntos_izq):
+        x0, y0 = 0, int(-r[2]/r[1])
+        x1, y1 = img_izq.shape[1], int(-(r[2] + r[0] * img_izq.shape[1]) / r[1])
+        cv2.line(img_izq, (x0, y0), (x1, y1), (0, 255, 255), 2)
+        cv2.circle(img_izq, tuple(np.round(pt).astype(int)), 5, (0, 0, 255), -1)
+
+    for r, pt in zip(lineas_der, puntos_der):
+        x0, y0 = 0, int(-r[2]/r[1])
+        x1, y1 = img_der.shape[1], int(-(r[2] + r[0] * img_der.shape[1]) / r[1])
+        cv2.line(img_der, (x0, y0), (x1, y1), (0, 255, 255), 2)
+        cv2.circle(img_der, tuple(np.round(pt).astype(int)), 5, (0, 0, 255), -1)
+
+    e_izq, e_der = obtener_epipolos(F)
+    cv2.circle(img_izq, tuple(np.round(e_izq).astype(int)), 10, (0, 255, 0), -1)
+    cv2.circle(img_der, tuple(np.round(e_der).astype(int)), 10, (0, 255, 0), -1)
+
+    plt.figure(figsize=(12, 6))
+    plt.subplot(121), plt.imshow(cv2.cvtColor(img_izq, cv2.COLOR_BGR2RGB)), plt.title("Imagen Izquierda")
+    plt.subplot(122), plt.imshow(cv2.cvtColor(img_der, cv2.COLOR_BGR2RGB)), plt.title("Imagen Derecha")
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+def visualizar_epipolares_4(img_izq, img_der, F, pts_izq, pts_der):
+    idx = np.random.choice(len(pts_izq), 4, replace=False)
+    pts_izq = pts_izq[idx]
+    pts_der = pts_der[idx]
+
+    img_izq_color = cv2.cvtColor(img_izq, cv2.COLOR_GRAY2BGR)
+    img_der_color = cv2.cvtColor(img_der, cv2.COLOR_GRAY2BGR)
+    img_izq_líneas = img_izq_color.copy()
+    img_der_líneas = img_der_color.copy()
+
+    for pt in pts_izq:
+        cv2.circle(img_izq_color, tuple(np.round(pt).astype(int)), 6, (0, 0, 255), -1)
+
+    pts_izq_h = np.hstack((pts_izq, np.ones((pts_izq.shape[0], 1))))
+    l_der = (F @ pts_izq_h.T).T
+    for r in l_der:
+        x0, y0 = 0, int(-r[2] / r[1])
+        x1, y1 = img_der.shape[1], int(-(r[2] + r[0] * img_der.shape[1]) / r[1])
+        cv2.line(img_der_color, (x0, y0), (x1, y1), (0, 255, 0), 2)
+
+    for pt in pts_der:
+        cv2.circle(img_der_líneas, tuple(np.round(pt).astype(int)), 6, (255, 0, 0), -1)
+
+    pts_der_h = np.hstack((pts_der, np.ones((pts_der.shape[0], 1))))
+    l_izq = (F.T @ pts_der_h.T).T
+    for r in l_izq:
+        x0, y0 = 0, int(-r[2] / r[1])
+        x1, y1 = img_izq.shape[1], int(-(r[2] + r[0] * img_izq.shape[1]) / r[1])
+        cv2.line(img_izq_líneas, (x0, y0), (x1, y1), (255, 255, 0), 2)
+
+    e_izq, e_der = obtener_epipolos(F)
+    for img in [img_izq_color, img_izq_líneas]:
+        cv2.circle(img, tuple(np.round(e_izq).astype(int)), 8, (0, 255, 255), -1)
+    for img in [img_der_color, img_der_líneas]:
+        cv2.circle(img, tuple(np.round(e_der).astype(int)), 8, (0, 255, 255), -1)
+
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+
+    axs[0, 0].imshow(cv2.cvtColor(img_izq_color, cv2.COLOR_BGR2RGB))
+    axs[0, 0].set_title("Puntos en imagen izquierda")
+
+    axs[0, 1].imshow(cv2.cvtColor(img_izq_líneas, cv2.COLOR_BGR2RGB))
+    axs[0, 1].set_title("Líneas epipolares en imagen izquierda")
+
+    axs[1, 0].imshow(cv2.cvtColor(img_der_color, cv2.COLOR_BGR2RGB))
+    axs[1, 0].set_title("Líneas epipolares en imagen derecha")
+
+    axs[1, 1].imshow(cv2.cvtColor(img_der_líneas, cv2.COLOR_BGR2RGB))
+    axs[1, 1].set_title("Puntos en imagen derecha")
+
+    for ax in axs.flatten():
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+F, pts_izq_inliers, pts_der_inliers = matriz_fundamental('pelota1.jpg', 'pelota2.jpg', semilla=42)
+if F is not None:
+    img_izq = cv2.imread('pelota1.jpg', cv2.IMREAD_GRAYSCALE)
+    img_der = cv2.imread('pelota2.jpg', cv2.IMREAD_GRAYSCALE)
+    lineas_epipolares(img_izq, img_der, F, pts_izq_inliers, pts_der_inliers)
+    visualizar_epipolares_4(img_izq, img_der, F, pts_izq_inliers, pts_der_inliers)   
+
+def mostrar_ecuacion_linea_epipolar_automatica(F, puntos, lado='derecha', indice=None):
+    if puntos is None or len(puntos) == 0:
+        print("No hay puntos para calcular la línea epipolar.")
+        return
+    if indice is None:
+        indice = 0 
+    punto = puntos[indice]
+    x_h = np.array([punto[0], punto[1], 1])
+    if lado == 'derecha':
+        l = F @ x_h
+        imagen = 'imagen derecha'
+        origen = 'izquierda'
+    else:
+        l = F.T @ x_h
+        imagen = 'imagen izquierda'
+        origen = 'derecha'
+    a, b, c = l
+    print(f"Punto {punto} en la imagen de la {origen}")
+    print(f"Ecuación de la línea epipolar en la {imagen}:")
+    print(f"  {a:.6e} x + {b:.6e} y + {c:.6e} = 0\n")
+
+mostrar_ecuacion_linea_epipolar_automatica(F, pts_izq_inliers,lado='derecha')
+
+def matriz_esencial(F, mtx):
+    E = mtx.T @ F @ mtx
+    
+    U, S, Vt = np.linalg.svd(E)
+
+    S_new = np.array([(S[0] + S[1]) / 2, (S[0] + S[1]) / 2, 0])
+    print("Valores singulares para E:", S_new)
+
+    E = U @ np.diag(S_new) @ Vt
+    print("Matriz Esencial E:")
+    print(E)
+
+    return E
+
+E=matriz_esencial(F, mtx)
