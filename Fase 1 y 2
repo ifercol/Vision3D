@@ -280,9 +280,9 @@ def lineas_epipolares(imagen_izq, imagen_der, F, puntos_izq, puntos_der):
     plt.show()
 
 def visualizar_epipolares_4(img_izq, img_der, F, pts_izq, pts_der):
-    idx = np.random.choice(len(pts_izq), 4, replace=False)
-    pts_izq = pts_izq[idx]
-    pts_der = pts_der[idx]
+
+    pts_izq = np.array([[699, 1103], [772, 1231], [1134, 1284]], dtype=np.float32)
+    pts_der = np.array([[1152, 1167], [1277, 1308], [1551, 1304]], dtype=np.float32)
 
     img_izq_color = cv2.cvtColor(img_izq, cv2.COLOR_GRAY2BGR)
     img_der_color = cv2.cvtColor(img_der, cv2.COLOR_GRAY2BGR)
@@ -333,14 +333,7 @@ def visualizar_epipolares_4(img_izq, img_der, F, pts_izq, pts_der):
         ax.axis('off')
 
     plt.tight_layout()
-    plt.show()
-
-F, pts_izq_inliers, pts_der_inliers = matriz_fundamental('pelota1.jpg', 'pelota2.jpg', semilla=42)
-if F is not None:
-    img_izq = cv2.imread('pelota1.jpg', cv2.IMREAD_GRAYSCALE)
-    img_der = cv2.imread('pelota2.jpg', cv2.IMREAD_GRAYSCALE)
-    lineas_epipolares(img_izq, img_der, F, pts_izq_inliers, pts_der_inliers)
-    visualizar_epipolares_4(img_izq, img_der, F, pts_izq_inliers, pts_der_inliers)   
+    plt.show()  
 
 def mostrar_ecuacion_linea_epipolar_automatica(F, puntos, lado='derecha', indice=None):
     if puntos is None or len(puntos) == 0:
