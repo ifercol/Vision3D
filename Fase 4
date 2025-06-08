@@ -1,134 +1,119 @@
 import numpy as np
-import cv2
-import os
 import matplotlib.pyplot as plt
-from typing import Tuple
-%matplotlib inline
-from mpl_toolkits.mplot3d import Axes3D
+import cv2
 
-def ajustar_K_por_recorte(K_original, x_offset, y_offset):
-    K = K_original.copy()
-    K[0, 2] -= x_offset
-    K[1, 2] -= y_offset
-    return K
-
-def emparejamiento_por_bloques(imagen_izq, imagen_der, tamaño_bloque=7, disp_max=64):
-    alto, ancho = imagen_izq.shape
+def emparejamiento_por_bloques(Il, Ir, tamaño_bloque=5, disparidad_max=64):
+    h, w = Il.shape
     mitad = tamaño_bloque // 2
-    disparidad = np.zeros((alto, ancho), dtype=np.float32)
+    disparidad = np.zeros((h, w), dtype=np.float32)
 
-    for y in range(mitad, alto - mitad):
-        for x in range(mitad + disp_max, ancho - mitad):
+    # Padding de las imágenes para evitar errores al acceder a los bordes
+    Il_pad = np.pad(Il, ((mitad, mitad), (mitad, mitad)), mode='constant', constant_values=0)
+    Ir_pad = np.pad(Ir, ((mitad, mitad), (mitad, mitad)), mode='constant', constant_values=0)
+
+    # Calcular el mapa de disparidad por bloque
+    for y in range(mitad, h - mitad):
+        for x in range(mitad + disparidad_max, w - mitad):
+            bloque_izq = Il_pad[y:y + tamaño_bloque, x:x + tamaño_bloque]
             ssd_min = float('inf')
             mejor_desplazamiento = 0
 
-            bloque_izq = imagen_izq[y - mitad:y + mitad + 1, x - mitad:x + mitad + 1]
-
-            for d in range(disp_max):
-                x_der = x - d
-                if x_der - mitad < 0:
+            for d in range(disparidad_max):
+                xr = x - d
+                if xr - mitad < 0:
                     continue
-                bloque_der = imagen_der[y - mitad:y + mitad + 1, x_der - mitad:x_der + mitad + 1]
+                bloque_der = Ir_pad[y:y + tamaño_bloque, xr:xr + tamaño_bloque]
                 ssd = np.sum((bloque_izq - bloque_der) ** 2)
-
                 if ssd < ssd_min:
                     ssd_min = ssd
                     mejor_desplazamiento = d
 
             disparidad[y, x] = mejor_desplazamiento
-
     return disparidad
 
-def disparidad_a_nube_3d_con_color(disparidad, imagen_color, K, baseline=1.0):
-    alto, ancho = disparidad.shape
-    f = K[0, 0]
-    cx = K[0, 2]
-    cy = K[1, 2]
+def reproyectar_a_3D(disparidad, Q):
+    h, w = disparidad.shape
+    puntos_3D = np.zeros((h, w, 3), dtype=np.float32)
 
-    puntos_3d = []
-    colores = []
-
-    for y in range(alto):
-        for x in range(ancho):
+    for y in range(h):
+        for x in range(w):
             d = disparidad[y, x]
-            if d <= 0:
+            if d == 0:
                 continue
-            Z = (f * baseline) / d
-            X = (x - cx) * Z / f
-            Y = (y - cy) * Z / f
-            r, g, b = imagen_color[y, x]
-            puntos_3d.append([X, Y, Z])
-            colores.append([r / 255.0, g / 255.0, b / 255.0])
+            vec = np.array([x, y, d, 1.0], dtype=np.float32)
+            X = Q @ vec
+            X /= X[3]
+            puntos_3D[y, x] = X[:3]
+    return puntos_3D
 
-    return np.array(puntos_3d), np.array(colores)
+def visualizar_nube(puntos_3D, imagen, disparidad):
+    mascara = disparidad > 0
+    xyz = puntos_3D[mascara]
+    colores = imagen[mascara] / 255.0
 
-def mostrar_nube_3d_coloreada(puntos_xyz, colores_rgb, nombre_imagen='nube_3d_coloreada.png'):
-    fig = plt.figure(figsize=(10, 7))
+    fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
-
-    muestra_xyz = puntos_xyz[::5]
-    muestra_colores = colores_rgb[::5]
-    ax.scatter(muestra_xyz[:, 0], muestra_xyz[:, 1], muestra_xyz[:, 2], s=3, c=muestra_colores)
-
-    ax.set_title("Nube de puntos 3D con color real")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    plt.savefig(nombre_imagen, dpi=300, bbox_inches='tight')
+    idx = np.random.choice(xyz.shape[0], size=min(10000, xyz.shape[0]), replace=False)
+    ax.scatter(xyz[idx, 0], xyz[idx, 1], xyz[idx, 2], c=colores[idx], s=0.5)
+    ax.set_title("Nube de puntos 3D")
     plt.show()
 
-img_izq = cv2.imread('velas1.jpg', cv2.IMREAD_GRAYSCALE)
-img_der = cv2.imread('velas2.jpg', cv2.IMREAD_GRAYSCALE)
-img_color = cv2.imread('velas1.jpg', cv2.IMREAD_COLOR)
+# --- Cargar imágenes ---
+Il = cv2.imread("left.png", cv2.IMREAD_GRAYSCALE)
+Ir = cv2.imread("right.png", cv2.IMREAD_GRAYSCALE)
 
-if img_izq is None or img_der is None or img_color is None:
-    print("Error cargando imágenes.")
-else:
-    x0, y0 = 500, 500
-    ancho, alto = 500, 500
-    img_izq = img_izq[y0:y0+alto, x0:x0+ancho]
-    img_der = img_der[y0:y0+alto, x0:x0+ancho]
-    img_color = img_color[y0:y0+alto, x0:x0+ancho]
+# Verificar si las imágenes se han cargado correctamente
+if Il is None or Ir is None:
+    raise FileNotFoundError("No se pudo cargar una o ambas imágenes.")
 
-    K_original = np.array([
-        [1575.10467, 0, 822.562562],
-        [0, 1578.25964, 792.937769],
-        [0, 0, 1]
-    ])
-    t = np.array([[-0.61897775], [-0.77188372], [3.55123299]])
-    baseline = np.linalg.norm(t)
-    K = ajustar_K_por_recorte(K_original, x0, y0)
+# Mostrar las imágenes para verificar que están bien cargadas
+plt.subplot(1, 2, 1)
+plt.imshow(Il, cmap='gray')
+plt.title("Imagen izquierda")
 
-    print("Calculando disparidad...")
-    mapa_disparidad = emparejamiento_por_bloques(img_izq, img_der, tamaño_bloque=7, disp_max=64)
+plt.subplot(1, 2, 2)
+plt.imshow(Ir, cmap='gray')
+plt.title("Imagen derecha")
+plt.show()
 
-    num_validos = np.count_nonzero(mapa_disparidad)
-    print("Píxeles con disparidad válida:", num_validos)
-    if num_validos == 0:
-        print("No se encontró ninguna disparidad válida. Verificá el recorte y el rango disp_max.")
-    else:
-        print("Rango de disparidades:", np.min(mapa_disparidad), np.max(mapa_disparidad))
+# Redimensionar las imágenes a las mismas dimensiones si es necesario
+if Il.shape != Ir.shape:
+    Ir = cv2.resize(Ir, (Il.shape[1], Il.shape[0]))
 
-        plt.imshow(mapa_disparidad, cmap='plasma')
-        plt.colorbar(label='Disparidad')
-        plt.title("Mapa de Disparidad")
-        plt.axis('off')
-        plt.show()
+# Verificar dimensiones después de redimensionar
+print(f"Dimensiones imagen izquierda: {Il.shape}")
+print(f"Dimensiones imagen derecha: {Ir.shape}")
 
-        print("Generando nube 3D con color...")
-        nube_puntos, colores = disparidad_a_nube_3d_con_color(mapa_disparidad, img_color, K, baseline)
-        print(f"Total puntos generados: {len(nube_puntos)}")
+# --- Calcular disparidad ---
+disp = emparejamiento_por_bloques(Il, Ir, tamaño_bloque=5, disparidad_max=64)
 
-        z_min, z_max = 100, 1500
-        if nube_puntos.size == 0:
-            print("Ningún punto 3D generado.")
-        else:
-            filtro = (nube_puntos[:, 2] >= z_min) & (nube_puntos[:, 2] <= z_max)
-            nube_filtrada = nube_puntos[filtro]
-            colores_filtrados = colores[filtro]
-            print(f"Puntos tras filtrado Z [{z_min}, {z_max}]: {len(nube_filtrada)}")
+# Visualizar el mapa de disparidad
+plt.imshow(disp, cmap='plasma')
+plt.title("Mapa de disparidad")
+plt.colorbar()
+plt.show()
 
-            if len(nube_filtrada) > 0:
-                mostrar_nube_3d_coloreada(nube_filtrada, colores_filtrados)
-            else:
-                print("No hay puntos dentro del rango Z especificado.")
+# --- Matriz Q sintética ---
+focal = 1.0
+baseline = 1.0
+cx = Il.shape[1] / 2
+cy = Il.shape[0] / 2
+
+Q = np.array([
+    [1, 0, 0, -cx],
+    [0, -1, 0, cy],  # se invierte Y para que apunte hacia arriba
+    [0, 0, 0, -focal],
+    [0, 0, 1 / baseline, 0]
+], dtype=np.float32)
+
+# --- Generar nube de puntos ---
+puntos_3D = reproyectar_a_3D(disp, Q)
+
+# Verificar el tamaño de la nube de puntos
+print(f"Puntos 3D generados: {puntos_3D.shape}")
+
+# Verificar si hay algún valor vacío o nulo en los puntos 3D
+print(f"Valores nulos en la nube de puntos: {np.any(np.isnan(puntos_3D))}")
+
+# --- Visualizar la nube de puntos 3D ---
+visualizar_nube(puntos_3D, Il, disp)
